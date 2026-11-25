@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PhoneTransfer</title>
+<style>
+  :root{--bg:#f4f6fb;--card:#fff;--fg:#1c2030;--mut:#6b7285;--acc:#2f6bff;--ok:#1fa971;--line:#e6e9f2}
+  @media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b22;--fg:#e8eaf0;--mut:#8a90a0;--line:#262a36}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,Segoe UI,sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:24px 16px}
+  h1{margin:0 0 4px;font-size:26px}
+  .tag{color:var(--mut);margin-bottom:20px}
+  .grid{display:grid;gap:18px;grid-template-columns:1fr 1fr}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border-radius:16px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  h2{margin:0 0 4px;font-size:18px}
+  .sub{color:var(--mut);font-size:14px;margin-bottom:14px}
+  .drop{border:2px dashed var(--line);border-radius:14px;padding:34px 12px;text-align:center;color:var(--mut);cursor:pointer;transition:.15s}
+  .drop.on,.drop:hover{border-color:var(--acc);color:var(--fg);background:rgba(47,107,255,.05)}
+  .drop b{display:block;font-size:17px;color:var(--fg);margin-bottom:4px}
+  .row{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+  .row .n{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row .s{color:var(--mut);font-size:13px}
+  a.btn{background:var(--acc);color:#fff;text-decoration:none;border-radius:10px;padding:8px 14px;font-weight:600;font-size:14px}
+  .empty{color:var(--mut);padding:12px 0;font-size:14px}
+  .bar{height:8px;border-radius:5px;background:var(--line);overflow:hidden;margin-top:6px}
+  .bar i{display:block;height:100%;width:0;background:var(--ok);transition:width .1s}
+  .up{padding:8px 0;font-size:14px}
+  #conn{display:inline-block;font-size:13px;border-radius:20px;padding:3px 10px;background:rgba(31,169,113,.15);color:var(--ok);margin-left:8px;vertical-align:middle}
+  #conn.bad{background:rgba(220,60,60,.15);color:#dc3c3c}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>PhoneTransfer <span id="conn">Connected</span></h1>
+  <div class="tag">Move files between your phone and this computer over the phone's hotspot.</div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Get files from your phone</h2>
+      <div class="sub">On the phone, tap "Choose files to send to laptop". They show up here.</div>
+      <div id="phoneList"></div>
+    </div>
+
+    <div class="card">
+      <h2>Send files to your phone</h2>
+      <div class="sub">They are saved on the phone in Downloads &rsaquo; PhoneTransfer.</div>
+      <div class="drop" id="drop"><b>Drag files here</b>or click to choose</div>
+      <div id="ups"></div>
+      <div id="recv"></div>
+    </div>
+  </div>
+</div>
+<input type="file" id="pick" multiple hidden>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = b => b >= 1e9 ? (b/1e9).toFixed(2)+" GB" : b >= 1e6 ? (b/1e6).toFixed(1)+" MB" : b >= 1e3 ? Math.round(b/1e3)+" KB" : b+" B";
+
+function rowEl(name, size, extra) {
+  const r = document.createElement("div"); r.className = "row";
+  const n = document.createElement("div"); n.className = "n";
+  const t = document.createElement("div"); t.textContent = name;
+  const s = document.createElement("div"); s.className = "s"; s.textContent = size;
+  n.append(t, s); r.append(n);
+  if (extra) r.append(extra);
+  return r;
+}
+
+async function refresh() {
+  try {
+    const d = await (await fetch("/api/list", {cache: "no-store"})).json();
+    $("#conn").textContent = "Connected"; $("#conn").className = "";
+    const pl = $("#phoneList"); pl.replaceChildren();
+    if (!d.phone.length) {
+      const e = document.createElement("div"); e.className = "empty"; e.textContent = "No files shared yet."; pl.append(e);
+    }
+    for (const f of d.phone) {
+      const a = document.createElement("a"); a.className = "btn"; a.textContent = "Download";
+      a.href = "/dl/" + f.id; a.setAttribute("download", f.name);
+      pl.append(rowEl(f.name, f.size >= 0 ? fmt(f.size) : "", a));
+    }
+    const rv = $("#recv"); rv.replaceChildren();
+    for (const f of d.received.slice().reverse()) rv.append(rowEl(f.name, fmt(f.size) + " • saved on phone"));
+  } catch (e) {
+    $("#conn").textContent = "Disconnected"; $("#conn").className = "bad";
+  }
+}
+
+const queue = []; let busy = false;
+function enqueue(files) {
+  for (const f of files) {
+    const box = document.createElement("div"); box.className = "up";
+    const lab = document.createElement("div"); lab.textContent = f.name + " — waiting";
+    const bar = document.createElement("div"); bar.className = "bar"; const fill = document.createElement("i"); bar.append(fill);
+    box.append(lab, bar); $("#ups").prepend(box);
+    queue.push({f, lab, fill});
+  }
+  pump();
+}
+function pump() {
+  if (busy || !queue.length) return;
+  busy = true;
+  const {f, lab, fill} = queue.shift();
+  const t0 = Date.now();
+  const x = new XMLHttpRequest();
+  x.open("PUT", "/up?name=" + encodeURIComponent(f.name));
+  x.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    const sec = (Date.now() - t0) / 1000 || 1;
+    fill.style.width = (e.loaded / e.total * 100) + "%";
+    lab.textContent = f.name + " — " + Math.floor(e.loaded / e.total * 100) + "% • " + (e.loaded / 1e6 / sec).toFixed(1) + " MB/s";
+  };
+  x.onload = () => { lab.textContent = f.name + (x.status === 200 ? " — done ✔" : " — failed"); if (x.status === 200) fill.style.width = "100%"; };
+  x.onerror = () => { lab.textContent = f.name + " — failed (connection lost)"; };
+  x.onloadend = () => { busy = false; refresh(); pump(); };
+  x.send(f);
+}
+
+const drop = $("#drop"), pick = $("#pick");
+drop.onclick = () => pick.click();
+pick.onchange = e => { enqueue([...e.target.files]); e.target.value = ""; };
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("on"); };
+drop.ondragleave = () => drop.classList.remove("on");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("on"); enqueue([...e.dataTransfer.files]); };
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => e.preventDefault());
+
+refresh(); setInterval(refresh, 2500);
+</script>
+</body>
+</html>
